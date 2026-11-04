@@ -21,7 +21,7 @@ use vm_memory::{
 };
 
 use crate::MemorySlotAllocator;
-use crate::aligned_mapping::MmapRegion as AlignedMapping;
+use crate::aligned_mapping::AlignedMapping;
 
 /// Errors registering guest memory with the hypervisor.
 #[derive(Error, Debug)]
@@ -107,11 +107,12 @@ impl GuestRegion {
         })
     }
 
-    /// Create a shared file mapping with the alignment used for PCI BARs.
+    /// Create a shared file mapping with the requested host address alignment.
     /// The returned region owns the allocation but is not registered yet.
     pub fn from_file(
         file_offset: FileOffset,
         size: usize,
+        alignment: usize,
         guest_addr: GuestAddress,
         prot: i32,
         vm: Arc<dyn hypervisor::Vm>,
@@ -122,6 +123,7 @@ impl GuestRegion {
             .ok_or(Error::InvalidGuestAddress(guest_addr.raw_value()))?;
         let backing = AlignedMapping::mmap(
             size as u64,
+            alignment,
             prot,
             file_offset.file().as_fd(),
             file_offset.start(),
@@ -132,7 +134,7 @@ impl GuestRegion {
         // is dropped. The non-owning mmap Arc cannot escape GuestRegion.
         let mapping = unsafe {
             MmapRegionBuilder::new_with_bitmap(size, AtomicBitmap::with_len(size))
-                .with_raw_mmap_pointer(backing.addr())
+                .with_raw_mmap_pointer(backing.addr)
                 .with_file_offset(file_offset)
                 .with_mmap_prot(prot)
                 .with_mmap_flags(libc::MAP_SHARED)

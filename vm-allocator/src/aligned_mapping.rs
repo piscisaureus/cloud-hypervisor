@@ -1,20 +1,17 @@
 // Copyright © 2025 Demi Marie Obenour
 //
-// SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
-
-//! Helpers for `mmap()`
+// SPDX-License-Identifier: Apache-2.0
+//
 
 use core::ffi::{c_int, c_void};
 use core::ptr::null_mut;
-use std::io::{self, Error, ErrorKind};
-use std::os::fd::{AsRawFd as _, BorrowedFd};
+use std::io::{self, ErrorKind};
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 use libc::size_t;
 use log::warn;
 
 use crate::page_size::get_page_size;
-
-const ONE_GIB: usize = 1024 * 1024 * 1024;
 
 /// # SAFETY
 ///
@@ -28,17 +25,8 @@ unsafe fn munmap(addr: *mut c_void, len: size_t) {
             "Failed to munmap region address {:p} length 0x{:x}, {}, leaking...",
             addr,
             len,
-            Error::last_os_error()
+            io::Error::last_os_error()
         );
-    }
-}
-
-fn find_alignment(len: size_t) -> usize {
-    let page_size = get_page_size() as usize;
-    if len >= ONE_GIB {
-        ONE_GIB
-    } else {
-        len.next_power_of_two().max(page_size)
     }
 }
 
@@ -55,7 +43,7 @@ fn reserve_mapping(reserve: size_t, alignment: usize) -> io::Result<(*mut c_void
         )
     };
     if base == libc::MAP_FAILED {
-        return Err(Error::last_os_error());
+        return Err(io::Error::last_os_error());
     }
 
     let aligned = (base as usize).next_multiple_of(alignment) as *mut c_void;
@@ -104,11 +92,17 @@ unsafe fn trim_mapping(base: *mut c_void, reserve: size_t, aligned: *mut c_void,
 
 fn allocate_aligned_mapping(
     len: size_t,
+    alignment: usize,
     prot: c_int,
     fd: BorrowedFd,
     offset: libc::off_t,
 ) -> io::Result<*mut c_void> {
-    let alignment = find_alignment(len);
+    if !alignment.is_power_of_two() || alignment < get_page_size() as usize {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Alignment must be a power of two and at least the page size",
+        ));
+    }
 
     if alignment == get_page_size() as usize {
         // SAFETY: FFI call with correct parameters.
@@ -123,13 +117,13 @@ fn allocate_aligned_mapping(
             )
         };
         if addr == libc::MAP_FAILED {
-            return Err(Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
         return Ok(addr);
     }
 
     let Some(reserve) = len.checked_add(alignment) else {
-        return Err(Error::new(
+        return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "Length+Alignment overflows",
         ));
@@ -154,7 +148,7 @@ fn allocate_aligned_mapping(
         )
     };
     if addr == libc::MAP_FAILED {
-        let err = Error::last_os_error();
+        let err = io::Error::last_os_error();
         // SAFETY: [aligned, aligned+len) is a valid region
         unsafe {
             munmap(aligned, len);
@@ -172,12 +166,12 @@ fn allocate_aligned_mapping(
 /// cause SIGSEGV or SIGBUS.  Non-atomic access will generally cause data
 /// races and thus Undefined Behavior.
 #[derive(Debug)]
-pub struct MmapRegion {
-    addr: *mut u8,
+pub(crate) struct AlignedMapping {
+    pub(crate) addr: *mut u8,
     len: size_t,
 }
 
-impl Drop for MmapRegion {
+impl Drop for AlignedMapping {
     fn drop(&mut self) {
         // SAFETY: guaranteed by type validity invariant
         unsafe {
@@ -186,29 +180,15 @@ impl Drop for MmapRegion {
     }
 }
 // SAFETY: the caller is responsible for avoiding data races
-unsafe impl Send for MmapRegion {}
+unsafe impl Send for AlignedMapping {}
 // SAFETY: the caller is responsible for avoiding data races
-unsafe impl Sync for MmapRegion {}
+unsafe impl Sync for AlignedMapping {}
 
-impl MmapRegion {
-    /// Return the host address of the mapping.
-    #[inline]
-    pub fn addr(&self) -> *mut u8 {
-        self.addr
-    }
-
-    /// Return the length of the region.
-    /// This function promises that the return value fits in [`libc::size_t`]
-    /// and in [`isize`] and `unsafe` code can rely on this.
-    #[inline]
-    #[expect(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Create an [`MmapRegion`] using `mmap` of a file descriptor.
-    pub fn mmap(
+impl AlignedMapping {
+    /// Create an [`AlignedMapping`] using `mmap` of a file descriptor.
+    pub(crate) fn mmap(
         len: u64,
+        alignment: usize,
         prot: c_int,
         fd: BorrowedFd,
         offset1: u64,
@@ -218,16 +198,16 @@ impl MmapRegion {
         const BAD_OFFSET: &str = "Mapping length must fit \
 in both isize and libc::size_t";
         let Some(offset) = offset1.checked_add(offset2) else {
-            return Err(Error::new(ErrorKind::InvalidInput, BAD_OFFSET));
+            return Err(io::Error::new(ErrorKind::InvalidInput, BAD_OFFSET));
         };
         let Ok(offset) = libc::off_t::try_from(offset) else {
-            return Err(Error::new(ErrorKind::InvalidInput, BAD_OFFSET));
+            return Err(io::Error::new(ErrorKind::InvalidInput, BAD_OFFSET));
         };
         if isize::try_from(len).is_err() {
-            return Err(Error::new(ErrorKind::InvalidInput, BAD_LENGTH));
+            return Err(io::Error::new(ErrorKind::InvalidInput, BAD_LENGTH));
         }
         let Ok(len) = libc::size_t::try_from(len) else {
-            return Err(Error::new(ErrorKind::InvalidInput, BAD_LENGTH));
+            return Err(io::Error::new(ErrorKind::InvalidInput, BAD_LENGTH));
         };
 
         assert_eq!(
@@ -236,7 +216,7 @@ in both isize and libc::size_t";
             "bad protection"
         );
 
-        let addr = allocate_aligned_mapping(len, prot, fd, offset)?;
+        let addr = allocate_aligned_mapping(len, alignment, prot, fd, offset)?;
 
         Ok(Self {
             addr: addr.cast(),
@@ -249,8 +229,11 @@ in both isize and libc::size_t";
 mod tests {
     use super::*;
 
-    fn tail_trim_range_from_len(base_addr: usize, len: size_t) -> (usize, size_t) {
-        let alignment = find_alignment(len);
+    fn tail_trim_range_from_len(
+        base_addr: usize,
+        len: size_t,
+        alignment: usize,
+    ) -> (usize, size_t) {
         let reserve = len.checked_add(alignment).unwrap();
         let aligned_addr = base_addr.next_multiple_of(alignment);
 
@@ -258,34 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn find_alignment_scales_with_length() {
-        let page_size = get_page_size() as usize;
-
-        // Sub-page and page-sized mappings only need page alignment.
-        assert_eq!(find_alignment(1), page_size);
-        assert_eq!(find_alignment(page_size), page_size);
-
-        // Larger mappings round up to the next power of two.
-        assert_eq!(
-            find_alignment(page_size + 1),
-            (page_size + 1).next_power_of_two()
-        );
-        assert!(find_alignment(page_size + 1) > page_size);
-
-        // The alignment is capped at 1 GiB.
-        assert_eq!(find_alignment(ONE_GIB), ONE_GIB);
-        assert_eq!(find_alignment(ONE_GIB + 1), ONE_GIB);
-        assert_eq!(find_alignment(2 * ONE_GIB), ONE_GIB);
-    }
-
-    #[test]
     fn tail_trim_range_rounds_non_page_sized_len_up() {
         let page_size = get_page_size() as usize;
         let base_addr = 0x1000_0000;
         let len = page_size * 3 + 1;
-        let alignment = find_alignment(len);
+        let alignment = page_size * 4;
 
-        let (tail_addr, tail_len) = tail_trim_range_from_len(base_addr, len);
+        let (tail_addr, tail_len) = tail_trim_range_from_len(base_addr, len, alignment);
 
         // The tail starts at the first page boundary past the mapping ...
         assert_eq!(tail_addr, base_addr + page_size * 4);
@@ -299,9 +261,9 @@ mod tests {
         let page_size = get_page_size() as usize;
         let base_addr = 0x1000_0000;
         let len = page_size * 3;
-        let alignment = find_alignment(len);
+        let alignment = page_size * 4;
 
-        let (tail_addr, tail_len) = tail_trim_range_from_len(base_addr, len);
+        let (tail_addr, tail_len) = tail_trim_range_from_len(base_addr, len, alignment);
 
         // A page-aligned end needs no rounding.
         assert_eq!(tail_addr, base_addr + len);
@@ -313,9 +275,9 @@ mod tests {
         let page_size = get_page_size() as usize;
         let base_addr = 0x1000_0000;
         let len = page_size * 512 + 1;
-        let alignment = find_alignment(len);
+        let alignment = page_size * 1024;
 
-        let (tail_addr, tail_len) = tail_trim_range_from_len(base_addr, len);
+        let (tail_addr, tail_len) = tail_trim_range_from_len(base_addr, len, alignment);
 
         assert_eq!(tail_addr, base_addr + page_size * 513);
         assert_eq!(tail_addr % page_size, 0);
