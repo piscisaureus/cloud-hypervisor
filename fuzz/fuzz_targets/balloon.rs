@@ -493,10 +493,9 @@ fn bounded_pfn(v: u8) -> u32 {
 }
 
 fn create_guest_memory(shared: bool) -> Option<GuestMemory> {
-    let mem_region = vmm::memory_manager::MemoryManager::create_ram_region(
+    let mem_region = vmm::memory_manager::MemoryManager::create_ram_region_raw(
         &None,
         0,
-        GuestAddress(0),
         MEM_SIZE,
         false,
         false,
@@ -507,10 +506,10 @@ fn create_guest_memory(shared: bool) -> Option<GuestMemory> {
         false,
     )
     .ok()?;
-    let reporting_tail_region = vmm::memory_manager::MemoryManager::create_ram_region(
+    let mem_region = Arc::new(vm_memory::GuestRegionMmap::new(mem_region, GuestAddress(0))?.into());
+    let reporting_tail_region = vmm::memory_manager::MemoryManager::create_ram_region_raw(
         &None,
         0,
-        GuestAddress(MEM_SIZE as u64),
         REPORTING_TAIL_SIZE,
         false,
         false,
@@ -521,10 +520,10 @@ fn create_guest_memory(shared: bool) -> Option<GuestMemory> {
         false,
     )
     .ok()?;
-    let queue_region = vmm::memory_manager::MemoryManager::create_ram_region(
+    let reporting_tail_region = Arc::new(vm_memory::GuestRegionMmap::new(reporting_tail_region, GuestAddress(MEM_SIZE as u64))?.into());
+    let queue_region = vmm::memory_manager::MemoryManager::create_ram_region_raw(
         &None,
         0,
-        GuestAddress(QUEUE_REGION_BASE),
         QUEUE_REGION_SIZE,
         false,
         false,
@@ -535,6 +534,7 @@ fn create_guest_memory(shared: bool) -> Option<GuestMemory> {
         false,
     )
     .ok()?;
+    let queue_region = Arc::new(vm_memory::GuestRegionMmap::new(queue_region, GuestAddress(QUEUE_REGION_BASE))?.into());
 
     GuestMemory::from_arc_regions(vec![mem_region, reporting_tail_region, queue_region]).ok()
 }
