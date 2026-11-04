@@ -4548,7 +4548,7 @@ impl DeviceManager {
             .is_none_or(|p| p.vfio_p2p_dma)
             && device_cfg.pci_common.iommu != IommuType::Virtio;
 
-        let (memory_slot_allocator, guest_memory) = {
+        let (slot_allocator, guest_memory) = {
             let mm = memory_manager.lock().unwrap();
             (Arc::clone(mm.memory_slot_allocator()), mm.guest_memory())
         };
@@ -4569,7 +4569,7 @@ impl DeviceManager {
             p2p_dma,
             pci_device_bdf,
             Arc::clone(&self.address_manager.vm),
-            memory_slot_allocator,
+            slot_allocator,
             guest_memory,
             vm_migration::snapshot_from_id(snapshot, vfio_name.as_str()),
             device_cfg.x_nv_gpudirect_clique,
@@ -5579,14 +5579,12 @@ impl DeviceManager {
                 }
 
                 // Remove this device's MMIO regions from the DeviceManager's
-                // mmio_regions list. We match on UserMemoryRegion slot numbers
-                // rather than MmioRegion start addresses because move_bar()
-                // updates the device's region addresses but not the
-                // DeviceManager's cloned copies.
+                // mmio_regions list. The shared backing identifies each BAR
+                // even when its guest address changes.
                 let device_regions = vfio_pci_device.lock().unwrap().mmio_regions();
                 let mut mmio_regions = self.mmio_regions.lock().unwrap();
                 for device_region in &device_regions {
-                    mmio_regions.retain(|x| !x.has_matching_slots(device_region));
+                    mmio_regions.retain(|x| !x.has_matching_mappings(device_region));
                 }
 
                 (
