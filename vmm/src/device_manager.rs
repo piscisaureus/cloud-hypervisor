@@ -4560,7 +4560,6 @@ impl DeviceManager {
 
         let vfio_pci_device = VfioPciDevice::new(
             vfio_name.clone(),
-            Arc::clone(&self.address_manager.vm),
             vfio_device,
             vfio_ops,
             Arc::clone(&self.msi_interrupt_manager)
@@ -4569,6 +4568,7 @@ impl DeviceManager {
             device_cfg.pci_common.iommu.attached(),
             p2p_dma,
             pci_device_bdf,
+            Arc::clone(&self.address_manager.vm),
             memory_slot_allocator,
             guest_memory,
             vm_migration::snapshot_from_id(snapshot, vfio_name.as_str()),
