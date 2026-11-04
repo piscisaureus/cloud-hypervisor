@@ -222,6 +222,7 @@ impl VfioUserPciDevice {
                         slot,
                         start: mmio_region.start.0 + s.offset,
                         mapping,
+                        p2p_mapped: false,
                         // A vfio-user device exports no dma-buf.
                         #[cfg(feature = "kvm")]
                         dma_buf: None,
