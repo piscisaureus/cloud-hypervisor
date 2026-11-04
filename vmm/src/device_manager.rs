@@ -4784,12 +4784,12 @@ impl DeviceManager {
 
         let mut vfio_user_pci_device = VfioUserPciDevice::new(
             vfio_user_name.clone(),
-            Arc::clone(&self.address_manager.vm),
             Arc::clone(&client),
             Arc::clone(&self.msi_interrupt_manager)
                 as Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
             legacy_interrupt_group,
             pci_device_bdf,
+            Arc::clone(&self.address_manager.vm),
             Arc::clone(memory_manager.lock().unwrap().memory_slot_allocator()),
             vm_migration::snapshot_from_id(snapshot, vfio_user_name.as_str()),
         )
